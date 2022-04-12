@@ -1,0 +1,401 @@
+---
+title: "DE for VBCS-721"
+author: "Jay Kim & Daisy Fu"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    code_folding: hide
+    self_contained: yes
+    toc: true
+    toc_depth: 5
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    number_sections: true
+---
+# DE analysis 
+
+JIRA ticket number: VBCS-721
+
+Phage display data was obtained from the LiGA system. 
+
+The following comparisons are performed.  
+1. Anti_GS2 vs Control  
+2. AntiLewisX vs Control  
+3. CA19_9 vs Control  
+4. ConA vs Control  
+5. CTB vs Control  
+6. ECL vs Control  
+7. MAL_I vs Control  
+8. Naive vs Control  
+9. PNA vs Control  
+10. TR4 vs Control  
+11. VVL vs Control  
+12. WFA vs Control  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=F, message=F, cache=F)
+```
+
+# Load packages
+
+```{r load_libs}
+rm(list=ls())
+set.seed(0)
+
+library(enrichplot)
+library(tidyverse)
+library(edgeR)
+library(DESeq2)
+library(stringr)
+library(cowplot)
+library(RColorBrewer)
+library(ggrepel)
+library(EnhancedVolcano)
+# library(bbcRNA)
+# library(clusterProfiler)
+library(pcaExplorer)
+library(ComplexHeatmap)
+library(kableExtra)
+# library(ggsci)
+```
+
+# Import counts and meta data
+
+
+```{r load_data}
+base <- "./dna_count_output_dir/"
+output_dir <- 'de_out'
+dir.create(output_dir)
+col_name <- c("sdb_id", "seq_count")
+
+## meta data load
+meta_raw <- read_csv("BarcodeSampleMap.csv")
+meta_df <- meta_raw %>% mutate(samp_file = paste0(Sample, "_", Replicate, ".txt"))
+meta_df$sample <- paste0(meta_df$Sample, "_", meta_df$Replicate)
+meta_df <- meta_df %>% dplyr::rename(Group = Sample) %>% dplyr::select(sample, Group, Replicate, Forward, Reverse, samp_file) %>% data.frame()
+meta_df$sample <- str_replace(meta_df$sample, "-", "_")
+meta_df$Group <- str_replace(meta_df$Group, "-", "_")
+row.names(meta_df) <- meta_df$sample
+meta_df$Replicate <- as.factor(meta_df$Replicate)
+meta_df$Group <- as.factor(meta_df$Group)
+meta_df$Group <- relevel(meta_df$Group, ref = "Control")
+meta_df %>% dplyr::select(-sample) %>% DT::datatable()
+
+file_list <- file.path(paste0(base, meta_df$samp_file))
+
+## merge all dna count table files. use full_join to keep SDB IDs.
+merged_df <- file_list %>% lapply(read_csv, col_names = col_name) %>% purrr::reduce(full_join, by = 'sdb_id')
+merged_filt_df <- merged_df %>% dplyr::select(where(is.numeric))
+file_name <- str_extract(file_list, "[:alnum:]*-?[:alnum:]*_[12]") %>% str_replace(.,"-", "_")
+
+colnames(merged_filt_df) <- file_name
+merged_filt_df <- merged_filt_df %>% add_column(sdb_id = merged_df$sdb_id, .before = 1)
+# merged_filt_df %>% head(50) %>% view()
+
+## replace NA with 0
+merged_filt_df <- merged_filt_df %>% replace(is.na(.), 0)
+
+## duplicated values found in dna column
+count_df <- merged_filt_df %>% data.frame()
+count_filt <- count_df
+# count_filt <- count_df %>% distinct(dna, .keep_all = TRUE)
+rownames(count_filt) <- count_filt$sdb_id
+count_filt <- count_filt %>% dplyr::select(-sdb_id)
+# write_csv(count_df, "2022.04.05.ver.1.merged_count_table.tsv")
+```
+
+
+# PCA 
+
+DESeq2 is used to generate PCA here. 
+
+
+```{r PCA, fig.height= 6.5, fig.width=8}
+
+## now counts_24 and meta_df should be ready to feed into the dds or edgeR DGElist
+## PCA using DESeq2
+
+dds <- DESeqDataSetFromMatrix(countData = count_filt,
+                              colData = meta_df,
+                              design = ~Group)
+## use vst
+vsdata <- varianceStabilizingTransformation(dds, blind=FALSE)
+dds <- DESeq(dds)
+
+vsdata_colnames <- colnames(vsdata)
+
+pcaData <- DESeq2::plotPCA(vsdata, intgroup=c("Group"), returnData=TRUE)
+
+pcaobj_prop <- prcomp(t(assay(vsdata)))
+pcaobj_samp <- prcomp(assay(vsdata))
+percentVar <- round(pcaobj_prop$sdev ^2 / sum(pcaobj_prop$sdev ^ 2),3) * 100
+
+# pc1_pc2_pca <- ggplot(pcaData, aes(PC1, PC2, color=Group)) +
+#   geom_point(size=3) +
+#   xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+#   ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+#   theme_bw() +
+#   coord_fixed() + 
+#   ggrepel::geom_text_repel(label = meta_df$sample, size = 4) + 
+#   theme(legend.position = "none") #+ scale_color_ucscgb()
+# 
+# pc1_pc3_pca <- ggplot(pcaData, aes(PC1, PC3, color=Group)) +
+#   geom_point(size=3) +
+#   xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+#   ylab(paste0("PC3: ",percentVar[3],"% variance")) + 
+#   theme_bw() +
+#   coord_fixed() + 
+#   ggrepel::geom_text_repel(label = meta_df$sample, size = 4) + 
+#   theme(legend.position = "none")
+# 
+# pc2_pc3_pca <- ggplot(pcaData, aes(PC2, PC3, color=Group)) +
+#   geom_point(size=3) +
+#   xlab(paste0("PC1: ",percentVar[2],"% variance")) +
+#   ylab(paste0("PC3: ",percentVar[3],"% variance")) + 
+#   theme_bw() +
+#   coord_fixed() + 
+#   ggrepel::geom_text_repel(label = meta_df$sample, size = 4) + 
+#   theme(legend.position = "none")
+
+pca_pc1_pc2 <- pcaplot(vsdata, intgroup = "Group", pcX = 1, pcY = 2, title = "PC1 & PC2 - variance stabilizing transformed", ntop = Inf, text_labels = F)
+pca_pc1_pc3 <- pcaplot(vsdata, intgroup = "Group", pcX = 1, pcY = 3, title = "PC1 & PC3 - variance stabilizing transformed", ntop = Inf, text_labels = F)
+pca_pc2_pc3 <- pcaplot(vsdata, intgroup = "Group", pcX = 2, pcY = 3, title = "PC2 & PC3 - variance stabilizing transformed", ntop = Inf, text_labels = F)
+pca_pc1_pc2
+pca_pc1_pc3
+pca_pc2_pc3
+
+pcaobj_prop <- prcomp(t(assay(vsdata)))
+pcascree(pcaobj_prop, type='pev', title="Proportion of explained of variance") + scale_y_continuous(labels= scales::percent)
+
+
+```
+
+# DE analysis 
+
+
+```{r DE}
+## check if the orders are right. 
+all(rownames(meta_df) == colnames(count_filt)) 
+
+
+y <- DGEList(count_filt, samples = meta_df, group = meta_df$Group)
+design <- model.matrix(~0 + Group, data = meta_df)
+# design <- model.matrix(~0 + Genotype + Batch, data = meta)
+# intercept GenotypeKO and Batch1
+rownames(design) <- colnames(y)
+
+
+# keep <- rowSums(edgeR::cpm(y$counts) > 0.5) >= 2
+
+## edgeR user guide page 13
+keep <- filterByExpr(y)
+table(keep) ## check how many genes will be kept and how many will be removed. 
+
+y <- y[keep, , keep.lib.sizes=FALSE]
+y <- calcNormFactors(y)
+
+norm_counts <- edgeR::cpm(y, log=TRUE)
+
+## export count data, which are normalized and CPM, note here, log transformation is log2 based. 
+norm_counts_df <- norm_counts %>%
+  as.data.frame() %>% 
+  rownames_to_column(var = "sdb_id")
+  
+write_rds(norm_counts_df, paste0(output_dir, "/","norm_counts.rds"))
+write_tsv(norm_counts_df, paste0(output_dir, "/","norm_counts.tsv"))
+write_tsv(count_df, paste0(output_dir, "/", "raw_counts.tsv"))
+write_rds(count_df, paste0(output_dir, "/","raw_counts.rds"))
+
+
+y <- estimateDisp(y, design, robust=TRUE)
+# plotBCV(y, main=paste0("BCV plot"))
+
+fit <- glmQLFit(y, design, robust=TRUE)
+# plotQLDisp(fit, main=paste0("QLDisp plot"))
+
+# rm(contrasts_list)
+ contrasts_list <- c(
+                   "Anti_GM2-Control",
+                   "AntiLewisX-Control",
+                   "CA19_9-Control",
+                   "ConA-Control",
+                   "CTB-Control",
+                   "ECL-Control",
+                   "MAL_I-Control",
+                   "Naive-Control",
+                   "PNA-Control",
+                   "TR4-Control",
+                   "VVL-Control",
+                   "WFA-Control"
+                   )
+ 
+qlf <- glmQLFTest(fit)
+design <- model.matrix(~0+Group, data = y$samples)
+colnames(design) <- gsub("Group", "", colnames(design))
+
+list_with_names <- contrasts_list 
+names(list_with_names) <- list_with_names
+
+contrasts <- makeContrasts(contrasts=contrasts_list, levels=design)
+
+qlf <- lapply(rlang::set_names(colnames(contrasts), colnames(contrasts)), 
+               function(contrast){
+                 glmQLFTest(fit, contrast=contrasts[,contrast])} )
+
+res <- lapply(qlf, function(contrast) topTags(contrast, n = Inf))
+save(y, qlf, fit, res, file = paste0(output_dir, "/","edgeR", "_data_file.RData"))
+
+```
+
+# Define function
+
+```{r define_function}
+DE_gene_by_lappy <- function(current_contrast) {
+  qlf_current <- qlf[[current_contrast]]
+  res_current <- res[[current_contrast]]
+  toptags <- topTags(qlf_current, n = 10) %>% as.data.frame() #%>% dplyr::select(!c(Uniq_syms, entrez))
+  cat(paste0("Results of comparison ", current_contrast), sep = "\n\n")
+  cat(paste0("Samples and meta table for this comparison below: "), sep = "\n\n")
+  current_samples <- meta_df[meta_df$Group %in% str_split_fixed(current_contrast, "-", 2)[1, ], ] ## 
+  # print(current_samples %>% dplyr::select(sample, Group))
+  
+  cat(paste0(" "), sep = "\n\n")
+  cat(paste0("Number of DE genes: "), sep = "\n\n")
+  DE_sum <- summary(decideTests(qlf_current))
+  print(DE_sum)
+  
+  cat(paste0(" "), sep = "\n\n")
+  cat(paste0("Top 10 DE SDB ID sorted by FDR"), sep = "\n\n")
+  print(toptags)
+  
+  # print(plotMD(qlf_current, hl.cex= 0.75, main = paste0("MA plot of ", current_contrast)))
+  res_current$table <- rownames_to_column(res_current$table, var = 'sdb_id')
+  print(EnhancedVolcano(res_current$table, 
+                  lab = res_current$table$sdb_id,
+                  x = 'logFC', pCutoff = 0.05, FCcutoff= 1,
+                  y = 'FDR', subtitle = "",
+                  ylab = "-log10(FDR)",
+                  legendPosition = 'right',
+                  legendLabels = c("Not Sig", expression(Log[2] ~ FC), "FDR", expression(FDR ~ and ~ log[2] ~ FC)),
+                  caption="", title = paste0('Volcano plot of ', current_contrast)))
+
+  ## plot heatmap
+  heatmap_id <- qlf_current %>% topTags(., n = Inf) %>% as.data.frame() %>% rownames_to_column(var = 'sdb_id') %>% filter(abs(logFC) >= 1) %>% head(30)
+  logCPM <- cpm(y, log = T)
+  logCPM_df <- logCPM[, current_samples$sample]
+  print(Heatmap(t(scale(t(logCPM_df))), 
+          rect_gp = gpar(col = "white", lwd = 2), 
+          row_names_gp = gpar(fontsize = 5), 
+          row_dend_side = 'right',
+          column_title = "Heatmap of the top 30 DE SDBs", 
+          heatmap_legend_param = list(
+                                title = "z-score")
+          )
+  ) # end print
+  
+  sams_wanted <- current_samples$sample
+  
+  raw_counts_wanted <- as.data.frame(fit$counts)  %>%
+    .[, colnames(.) %in% sams_wanted] %>% rownames_to_column(., var = "sdb_id")
+  
+  norm_counts_wanted <- as.data.frame(norm_counts) %>%
+    .[, colnames(.) %in% sams_wanted] %>% rownames_to_column(., var = "sdb_id")
+  
+  res_export <- left_join(res_current$table, norm_counts_wanted, by= "sdb_id") 
+  res_export <- left_join(res_export, raw_counts_wanted, by = "sdb_id")
+  
+  colnames(res_export) <- colnames(res_export) %>% str_replace_all(., ".x", "_normalized_read") %>% str_replace_all(., ".y", "_raw_read")
+  
+  readr::write_tsv(res_export, file = paste0(output_dir,"/", "edgeR", "_", current_contrast, 
+                                              "_DE_results.tsv"))
+}
+
+```
+
+# DE gene results
+
+## Anti_GM2 vs Control
+```{r DE_comp1, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[1])
+
+```
+
+## AntiLewisX vs Control
+
+```{r DE_comp2, fig.height=8, fig.width=9}
+
+DE_gene_by_lappy(current_contrast = list_with_names[2])
+
+```
+
+## CA19_9 vs Control
+
+```{r DE_comp3, fig.height=8, fig.width=9}
+
+DE_gene_by_lappy(current_contrast = list_with_names[3])
+
+```
+
+## ConA vs Control
+
+```{r DE_comp4, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[4])
+
+```
+
+## CTB vs Control
+
+```{r DE_comp5, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[5])
+
+```
+
+## ECL vs Control
+
+```{r DE_com6, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[6])
+```
+
+## MAL_I vs Control
+
+```{r DE_comp7, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[7])
+```
+
+## Naive vs Control
+
+```{r DE_comp8, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[8])
+```
+
+## PNA vs Control
+
+```{r DE_comp9, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[9])
+```
+
+## TR4 vs Control
+
+```{r DE_comp10, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[10])
+```
+
+## VVL vs Control
+
+```{r DE_comp11, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[11])
+```
+
+## WFA vs Control
+
+
+```{r DE_comp12, fig.height=8, fig.width=9}
+DE_gene_by_lappy(current_contrast = list_with_names[12])
+```
+
+# Session Info
+```{r session_info, echo = TRUE, eval=TRUE}
+sessionInfo()
+```
+
